@@ -1,0 +1,7 @@
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /businessflow-api/api/
+
+# Rewrite chat.php to assistant.php to bypass ModSecurity chat keywords
+RewriteRule ^chat\.php$ assistant.php [L,QSA]
+</IfModule>

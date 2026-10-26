@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+﻿import { useEffect, useState, useCallback, useRef } from "react";
 import { getServices } from "./services/serviceApi";
 import { sendChatMessage } from "./services/chatApi";
 import { getMe, logoutUser } from "./services/authApi";
@@ -260,6 +260,10 @@ function App() {
     setCurrentUser(user);
     currentUserRef.current = user;
 
+    // Reset guest chat messages when switching to authenticated user session
+    setChatMessages([]);
+    setMessage("");
+
     // Retrieve saved plans from backend
     const subs = await loadUserSubscriptions();
 
@@ -351,7 +355,7 @@ function App() {
     setSending(true);
 
     try {
-      const res = await sendChatMessage(textToSend);
+      const res = await sendChatMessage(textToSend, currentUserRef.current || currentUser, subsRef.current || activeSubscriptions);
       const rawBotText = typeof res === "string" ? res : (res?.reply || res?.message || "I am here to help you navigate BusinessFlow AI services and demonstration plans.");
       // Sanitize response to remove unwanted markdown asterisks
       const cleanBotText = stripMarkdownFormatting(rawBotText);
@@ -440,7 +444,7 @@ function App() {
                 </p>
                 <div className="hero-cta-group">
                   <a href="#services" className="hero-primary-btn">
-                    Explore Available Services ↓
+                    Explore Available Services →
                   </a>
                   {currentUser ? (
                     <button

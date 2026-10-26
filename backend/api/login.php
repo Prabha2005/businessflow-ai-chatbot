@@ -5,7 +5,11 @@ require_once dirname(__DIR__) . '/db.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
-    echo json_encode(['error' => 'Only POST requests are allowed.'], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Only POST requests are allowed.',
+        'message' => 'Only POST requests are allowed.'
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -15,10 +19,19 @@ if ($rawInput === '' && isset($GLOBALS['MOCK_PHP_INPUT'])) {
 }
 $input = json_decode($rawInput, true);
 
+// Fallback to standard form POST data if JSON body was not sent
 if (!is_array($input)) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Invalid JSON payload.'], JSON_UNESCAPED_UNICODE);
-    exit;
+    if (!empty($_POST)) {
+        $input = $_POST;
+    } else {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'error' => 'Invalid JSON payload. Please send valid JSON data.',
+            'message' => 'Invalid JSON payload.'
+        ], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 }
 
 $email = strtolower(trim($input['email'] ?? ''));
@@ -26,24 +39,40 @@ $password = $input['password'] ?? '';
 
 if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
     http_response_code(400);
-    echo json_encode(['error' => 'Please enter a valid email address.'], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Please enter a valid email address.',
+        'message' => 'Please enter a valid email address.'
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 if (!is_string($password) || $password === '') {
     http_response_code(400);
-    echo json_encode(['error' => 'Please enter your password.'], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Please enter your password.',
+        'message' => 'Please enter your password.'
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 try {
+    if (!isset($pdo) || !$pdo) {
+        throw new Exception('Database connection is not initialized.');
+    }
+
     $stmt = $pdo->prepare('SELECT id, name, email, password_hash, created_at FROM users WHERE email = ? LIMIT 1');
     $stmt->execute([$email]);
     $user = $stmt->fetch();
 
     if (!$user || !password_verify($password, $user['password_hash'])) {
         http_response_code(401);
-        echo json_encode(['error' => 'Invalid email or password.'], JSON_UNESCAPED_UNICODE);
+        echo json_encode([
+            'success' => false,
+            'error' => 'Invalid email or password.',
+            'message' => 'Invalid email or password.'
+        ], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
@@ -67,9 +96,17 @@ try {
 } catch (PDOException $e) {
     error_log('Login error: ' . $e->getMessage());
     http_response_code(500);
-    echo json_encode(['error' => 'A server error occurred during login. Please try again later.'], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Database error occurred during login: ' . $e->getMessage(),
+        'message' => 'Database error occurred during login. Please try again later.'
+    ], JSON_UNESCAPED_UNICODE);
 } catch (Exception $e) {
     error_log('Login error: ' . $e->getMessage());
     http_response_code(500);
-    echo json_encode(['error' => 'A server error occurred during login. Please try again later.'], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        'success' => false,
+        'error' => $e->getMessage(),
+        'message' => $e->getMessage()
+    ], JSON_UNESCAPED_UNICODE);
 }
