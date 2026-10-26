@@ -21,3 +21,10 @@ apache-test.txt
 .idea/
 .DS_Store
 *.local
+
+# Local database backups and private data
+backend/*.backup.sql
+backend/businessflow_db.sql
+
+# Local backup files
+backend/api/*.backup

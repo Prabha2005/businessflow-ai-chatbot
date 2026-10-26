@@ -1,8 +1,8 @@
-const API_BASE_URL = (
+﻿const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
-  (import.meta.env.DEV
-    ? "http://localhost/businessflow-api/api"
-    : "https://businessflowai.freedev.app/businessflow-api/api")
+  (typeof window !== "undefined" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1"
+    ? `${window.location.origin}/businessflow-api/api`
+    : "http://localhost/businessflow-api/api")
 ).replace(/\/$/, "");
 
 export async function getServices() {

@@ -16,10 +16,14 @@ if ($rawInput === "" && isset($GLOBALS['MOCK_PHP_INPUT'])) {
 }
 $input = json_decode($rawInput, true);
 
-if (!is_array($input) && !empty($rawInput)) {
-    http_response_code(400);
-    echo json_encode(["error" => "Invalid JSON payload."], JSON_UNESCAPED_UNICODE);
-    exit;
+if (!is_array($input)) {
+    if (!empty($_POST)) {
+        $input = $_POST;
+    } else {
+        http_response_code(400);
+        echo json_encode(["success" => false, "error" => "Invalid JSON payload.", "message" => "Invalid JSON payload."], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 }
 
 $message = trim($input["message"] ?? "");
@@ -301,28 +305,93 @@ function classifyQuestionIntent(string $msg): string {
     return 'unknown_or_out_of_scope';
 }
 
-// 3. Authenticate user strictly via server-side PHP session
+// 3. Authenticate user: Server session primary, with payload context fallback for cross-origin resilience
 ensure_session_started();
 $currentUser = $_SESSION['user'] ?? null;
 $catalog = getAuthoritativeCatalog();
 $userSubs = [];
 
-if (is_array($currentUser) && !empty($currentUser['name']) && !empty($currentUser['id'])) {
-    $safeName = htmlspecialchars($currentUser['name'], ENT_QUOTES, 'UTF-8');
-    $userId = (int)$currentUser['id'];
+// Fallback to request payload user if session was lost across domains/workers
+if (!$currentUser) {
+    if (!empty($input['user']) && is_array($input['user']) && !empty($input['user']['name'])) {
+        $currentUser = [
+            'id' => (int)($input['user']['id'] ?? 0),
+            'name' => trim($input['user']['name'] ?? ''),
+            'email' => trim($input['user']['email'] ?? ''),
+            'created_at' => $input['user']['created_at'] ?? date('Y-m-d H:i:s')
+        ];
+        $_SESSION['user'] = $currentUser;
+    } elseif (!empty($input['userId']) && isset($pdo) && $pdo) {
+        try {
+            $uStmt = $pdo->prepare('SELECT id, name, email, created_at FROM users WHERE id = ? LIMIT 1');
+            $uStmt->execute([(int)$input['userId']]);
+            $uRow = $uStmt->fetch();
+            if ($uRow) {
+                $currentUser = [
+                    'id' => (int)$uRow['id'],
+                    'name' => $uRow['name'],
+                    'email' => $uRow['email'],
+                    'created_at' => $uRow['created_at']
+                ];
+                $_SESSION['user'] = $currentUser;
+            }
+        } catch (Exception $e) {}
+    } elseif (!empty($input['email']) && isset($pdo) && $pdo) {
+        try {
+            $uStmt = $pdo->prepare('SELECT id, name, email, created_at FROM users WHERE email = ? LIMIT 1');
+            $uStmt->execute([strtolower(trim($input['email']))]);
+            $uRow = $uStmt->fetch();
+            if ($uRow) {
+                $currentUser = [
+                    'id' => (int)$uRow['id'],
+                    'name' => $uRow['name'],
+                    'email' => $uRow['email'],
+                    'created_at' => $uRow['created_at']
+                ];
+                $_SESSION['user'] = $currentUser;
+            }
+        } catch (Exception $e) {}
+    }
+}
 
-    // Retrieve active demonstration subscriptions strictly for this session user
-    try {
-        $subStmt = $pdo->prepare(
-            'SELECT service_id, service_name, plan_id, plan_name, price, price_display, billing_cycle, renewal_date, status 
-             FROM subscriptions 
-             WHERE user_id = ? AND status = "active" 
-             ORDER BY id ASC'
-        );
-        $subStmt->execute([$userId]);
-        $userSubs = $subStmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch (Exception $e) {
-        $userSubs = [];
+if (is_array($currentUser) && !empty($currentUser['name'])) {
+    $safeName = htmlspecialchars($currentUser['name'], ENT_QUOTES, 'UTF-8');
+    $userId = (int)($currentUser['id'] ?? 0);
+
+    // 1. Retrieve active demonstration subscriptions from database if available
+    if ($userId > 0 && isset($pdo) && $pdo) {
+        try {
+            $subStmt = $pdo->prepare(
+                'SELECT service_id, service_name, plan_id, plan_name, price, price_display, billing_cycle, renewal_date, status
+                 FROM subscriptions
+                 WHERE user_id = ? AND status = "active"
+                 ORDER BY id ASC'
+            );
+            $subStmt->execute([$userId]);
+            $userSubs = $subStmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            $userSubs = [];
+        }
+    }
+
+    // 2. If DB query returned no subscriptions or DB is offline/unreachable on remote host,
+    // use active demonstration subscriptions sent directly from the client application state
+    if (empty($userSubs) && !empty($input['subscriptions']) && is_array($input['subscriptions'])) {
+        foreach ($input['subscriptions'] as $s) {
+            if (is_array($s) && !empty($s['plan_name'])) {
+                $userSubs[] = [
+                    'service_id' => (int)($s['service_id'] ?? 0),
+                    'service_name' => $s['service_name'] ?? 'Cloud Service',
+                    'plan_id' => $s['plan_id'] ?? '',
+                    'plan_name' => $s['plan_name'] ?? '',
+                    'price' => (float)($s['price'] ?? 0),
+                    'price_display' => $s['price_display'] ?? ('₹' . number_format((float)($s['price'] ?? 0), 0)),
+                    'billing_cycle' => $s['billing_cycle'] ?? 'Yearly',
+                    'renewal_date' => $s['renewal_date'] ?? 'Next Billing Cycle',
+                    'status' => 'active'
+                ];
+            }
+        }
     }
 } else {
     $safeName = null;
@@ -628,15 +697,29 @@ $payload = [
 
 // 7. Execute Request with Fallback
 $caFile = 'C:/xampp/php/extras/ssl/cacert.pem';
-$primaryModel = 'gemini-3.8-flash';
-$fallbackModel = 'gemini-3.5-flash-lite';
+if (!file_exists($caFile)) {
+    foreach (['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt'] as $certPath) {
+        if (file_exists($certPath)) {
+            $caFile = $certPath;
+            break;
+        }
+    }
+}
+$primaryModel = 'gemini-3-flash-preview';
+$fallbackModel = 'gemini-3.1-flash-lite-preview';
+$tertiaryModel = 'gemini-3.5-flash';
 
 $result = sendGeminiRequestWithRetry($primaryModel, $payload, $caFile, 1, 10);
 
-if (!$result['success'] && $result['is_retryable'] && !empty($fallbackModel)) {
-    $fallbackResult = sendGeminiRequestWithRetry($fallbackModel, $payload, $caFile, 2, 15);
+if (!$result['success'] && $result['is_retryable']) {
+    $fallbackResult = sendGeminiRequestWithRetry($fallbackModel, $payload, $caFile, 1, 10);
     if ($fallbackResult['success']) {
         $result = $fallbackResult;
+    } elseif (!empty($tertiaryModel)) {
+        $tertiaryResult = sendGeminiRequestWithRetry($tertiaryModel, $payload, $caFile, 1, 10);
+        if ($tertiaryResult['success']) {
+            $result = $tertiaryResult;
+        }
     }
 }
 
@@ -658,7 +741,11 @@ if ($result['success']) {
 
     http_response_code(200);
     echo json_encode(
-        ["reply" => $cleanReply],
+        [
+            "success" => true,
+            "reply" => $cleanReply,
+            "message" => $cleanReply
+        ],
         JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
     );
     exit;
@@ -667,18 +754,30 @@ if ($result['success']) {
 // Controlled error handling
 if ($result['http_code'] === 401 || $result['http_code'] === 403) {
     http_response_code(500);
-    echo json_encode(["error" => "AI service configuration error."], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        "success" => false,
+        "error" => "AI service configuration error.",
+        "message" => "AI service configuration error."
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 if ($result['is_retryable']) {
     http_response_code(503);
-    echo json_encode(["error" => "The AI assistant is temporarily experiencing high demand. Please try again shortly."], JSON_UNESCAPED_UNICODE);
+    echo json_encode([
+        "success" => false,
+        "error" => "The AI assistant is temporarily experiencing high demand. Please try again shortly.",
+        "message" => "The AI assistant is temporarily experiencing high demand. Please try again shortly."
+    ], JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 http_response_code(500);
-echo json_encode(["error" => "Unable to process your request at this time."], JSON_UNESCAPED_UNICODE);
+echo json_encode([
+    "success" => false,
+    "error" => "Unable to process your request at this time.",
+    "message" => "Unable to process your request at this time."
+], JSON_UNESCAPED_UNICODE);
 exit;
 
 /**
